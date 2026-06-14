@@ -7,28 +7,17 @@ Then open http://127.0.0.1:5001 in your browser.
 from __future__ import annotations
 
 import io
-import json
 import os
-import queue
-import secrets
 import shutil
 import tempfile
-import threading
-import time
 import zipfile
 
-from flask import Flask, Response, render_template_string, request, send_file
+from flask import Flask, render_template_string, request, send_file
 
 from port import convert
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MB upload cap
-
-# In-memory job registry. Conversion runs in a background thread and pushes
-# progress events onto the job's queue; the browser streams them over SSE.
-# NOTE: state lives in one process — run gunicorn with a single worker
-# (multiple threads is fine). See render.yaml.
-JOBS: dict[str, dict] = {}
 
 PAGE = """<!doctype html>
 <html lang="en">
@@ -185,43 +174,55 @@ drop.addEventListener('drop', e => { if (e.dataTransfer.files[0]) setFile(e.data
 
 const progress = document.getElementById('progress');
 const fill = document.getElementById('fill');
+let timer = null;
 
-function reset() {
-  go.disabled = false; go.textContent = 'Convert to Obsidian vault';
+function reset() { go.disabled = false; go.textContent = 'Convert to Obsidian vault'; }
+function fail(msg) {
+  if (timer) clearInterval(timer);
+  status.className='err'; status.textContent = '⚠ ' + (msg || 'something went wrong');
+  progress.classList.remove('show'); reset();
 }
-function fail(msg) { status.className='err'; status.textContent = '⚠ ' + msg; progress.classList.remove('show'); reset(); }
+
+// One plain request — no SSE. The bar is a time-based estimate that eases toward
+// ~92% and snaps to 100% when the zip arrives. Reliable behind any proxy/cold start.
+function startBar() {
+  progress.classList.add('show'); fill.style.width = '0%';
+  let pct = 0, t = 0;
+  const stages = [
+    [0,  'Uploading PDF…'],
+    [1,  'Extracting text, figures & tables…'],
+    [6,  'Rendering Markdown…'],
+    [12, 'Almost there — assembling the vault…'],
+    [22, 'Still working — large file or the server is waking up…'],
+  ];
+  timer = setInterval(() => {
+    t += 0.2;
+    pct = Math.min(92, pct + (92 - pct) * 0.04);   // ease toward 92%
+    fill.style.width = pct.toFixed(1) + '%';
+    let label = stages[0][1];
+    for (const [at, txt] of stages) if (t >= at) label = txt;
+    status.className=''; status.innerHTML = '<span class="spin"></span>' + label;
+  }, 200);
+}
 
 f.addEventListener('submit', async (e) => {
   e.preventDefault();
   if (!pdf.files[0]) { status.className='err'; status.textContent='Choose a PDF first.'; return; }
   go.disabled = true; go.innerHTML = '<span class="spin"></span>Converting…';
-  status.className=''; status.innerHTML = '<span class="spin"></span>Starting…';
-  progress.classList.add('show'); fill.style.width = '0%';
-
-  let job;
+  startBar();
   try {
     const res = await fetch('/convert', { method:'POST', body:new FormData(f) });
     if (!res.ok) return fail(await res.text());
-    job = await res.json();
-  } catch (err) { return fail(err); }
-
-  const es = new EventSource('/events/' + job.job_id);
-  es.onmessage = (ev) => {
-    const d = JSON.parse(ev.data);
-    if (d.type === 'progress') {
-      if (typeof d.frac === 'number') fill.style.width = Math.round(d.frac * 100) + '%';
-      status.className=''; status.innerHTML = '<span class="spin"></span>' + d.msg;
-    } else if (d.type === 'done') {
-      es.close(); fill.style.width = '100%';
-      const a = document.createElement('a');
-      a.href = '/download/' + job.job_id; a.download = job.name + '.zip'; a.click();
-      status.className='ok'; status.textContent = '✓ ' + d.summary + ' — downloading ' + d.name + '.zip';
-      reset();
-    } else if (d.type === 'error') {
-      es.close(); fail(d.msg);
-    }
-  };
-  es.onerror = () => { es.close(); fail('connection lost'); };
+    const blob = await res.blob();
+    clearInterval(timer); fill.style.width = '100%';
+    const name = (res.headers.get('X-Vault-Name') || 'vault') + '.zip';
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href=url; a.download=name; a.click();
+    URL.revokeObjectURL(url);
+    status.className='ok';
+    status.textContent = '✓ ' + (res.headers.get('X-Summary') || 'Done') + ' — downloaded ' + name;
+    reset();
+  } catch (err) { fail(err); }
 });
 </script>
 </body>
@@ -233,38 +234,11 @@ def index():
     return render_template_string(PAGE)
 
 
-def _zip_vault(out_dir: str, safe: str) -> io.BytesIO:
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for root, _dirs, files in os.walk(out_dir):
-            for name in files:
-                full = os.path.join(root, name)
-                arc = os.path.join(safe, os.path.relpath(full, out_dir))
-                zf.write(full, arc)
-    buf.seek(0)
-    return buf
-
-
-def _run_job(job_id: str, pdf_path: str, title: str, safe: str, work: str):
-    job = JOBS[job_id]
-    q = job["q"]
-    try:
-        out_dir = os.path.join(work, safe)
-        res = convert(pdf_path, out_dir, title, to="obsidian",
-                      progress=lambda m, frac=None: q.put({"type": "progress",
-                                                           "msg": m, "frac": frac}))
-        job["zip"] = _zip_vault(out_dir, safe)
-        job["summary"] = (f"{res['pages']} pages · {res['figures']} figures · "
-                          f"{res['tables']} tables")
-        q.put({"type": "done", "summary": job["summary"], "name": safe})
-    except Exception as e:  # surface to the browser
-        q.put({"type": "error", "msg": str(e)})
-    finally:
-        shutil.rmtree(work, ignore_errors=True)
-
-
 @app.post("/convert")
 def convert_endpoint():
+    """Convert in a single request and stream the vault zip back. Kept
+    synchronous on purpose: it works behind any proxy and through free-tier
+    cold starts, unlike a long-lived SSE/job connection."""
     up = request.files.get("pdf")
     if not up or not up.filename:
         return "No PDF uploaded.", 400
@@ -273,48 +247,31 @@ def convert_endpoint():
     safe = "".join(c for c in title if c.isalnum() or c in " -_").strip() or "vault"
 
     work = tempfile.mkdtemp(prefix="docsidian_")
-    pdf_path = os.path.join(work, "input.pdf")
-    up.save(pdf_path)
+    try:
+        pdf_path = os.path.join(work, "input.pdf")
+        up.save(pdf_path)
+        out_dir = os.path.join(work, safe)
+        res = convert(pdf_path, out_dir, title, to="obsidian")
 
-    job_id = secrets.token_urlsafe(12)
-    JOBS[job_id] = {"q": queue.Queue(), "zip": None, "summary": "", "ts": time.time()}
-    threading.Thread(target=_run_job, args=(job_id, pdf_path, title, safe, work),
-                     daemon=True).start()
-    return {"job_id": job_id, "name": safe}
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for root, _dirs, files in os.walk(out_dir):
+                for name in files:
+                    full = os.path.join(root, name)
+                    arc = os.path.join(safe, os.path.relpath(full, out_dir))
+                    zf.write(full, arc)
+        buf.seek(0)
 
-
-@app.get("/events/<job_id>")
-def events(job_id: str):
-    job = JOBS.get(job_id)
-    if not job:
-        return "Unknown job.", 404
-
-    def stream():
-        q = job["q"]
-        while True:
-            try:
-                evt = q.get(timeout=30)
-            except queue.Empty:
-                yield ": keepalive\n\n"
-                continue
-            yield f"data: {json.dumps(evt)}\n\n"
-            if evt["type"] in ("done", "error"):
-                break
-
-    return Response(stream(), mimetype="text/event-stream",
-                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-
-
-@app.get("/download/<job_id>")
-def download(job_id: str):
-    job = JOBS.get(job_id)
-    if not job or not job.get("zip"):
-        return "Not ready.", 404
-    buf = job["zip"]
-    buf.seek(0)
-    JOBS.pop(job_id, None)  # one-shot download, then forget
-    return send_file(buf, mimetype="application/zip", as_attachment=True,
-                     download_name=f"{job_id}.zip")
+        resp = send_file(buf, mimetype="application/zip", as_attachment=True,
+                         download_name=f"{safe}.zip")
+        resp.headers["X-Summary"] = (f"{res['pages']} pages · {res['figures']} "
+                                     f"figures · {res['tables']} tables")
+        resp.headers["X-Vault-Name"] = safe
+        return resp
+    except Exception as e:
+        return str(e), 500
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
 
 
 if __name__ == "__main__":
