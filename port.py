@@ -9,10 +9,17 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 
 from extract import extract_pdf
 from render import render_page, dominant_body_size
 from to_obsidian import write_vault
+
+
+def slugify(text: str) -> str:
+    """A short, filename-safe slug for namespacing a document's figures."""
+    s = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return s[:40] or "doc"
 
 
 def convert(pdf: str, out: str, title: str | None = None,
@@ -34,10 +41,11 @@ def convert(pdf: str, out: str, title: str | None = None,
 
     title = title or os.path.splitext(os.path.basename(pdf))[0]
     img_dir = os.path.join(out, "attachments")  # extract figures straight into the vault
+    prefix = slugify(title) + "-"  # namespace figures so vaults can hold many docs
 
     say("Opening PDF …", 0.02)
     pages = extract_pdf(
-        pdf, img_dir,
+        pdf, img_dir, prefix=prefix,
         progress=lambda i, n: say(f"Extracting page {i}/{n} …", 0.05 + 0.60 * i / n))
 
     body = dominant_body_size(pages)

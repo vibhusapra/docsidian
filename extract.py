@@ -160,8 +160,12 @@ def _rect_contains(outer, inner_bbox, pad: float = 2.0) -> bool:
     return (outer[0] - pad <= cx <= outer[2] + pad) and (outer[1] - pad <= cy <= outer[3] + pad)
 
 
-def extract_page(page, doc, img_dir: str, page_num: int) -> list[Element]:
-    """Return ordered elements for one page, saving images to img_dir."""
+def extract_page(page, doc, img_dir: str, page_num: int, prefix: str = "") -> list[Element]:
+    """Return ordered elements for one page, saving images to img_dir.
+
+    prefix: prepended to figure filenames so images from different documents
+    stay unique when their attachments are merged into one Obsidian vault.
+    """
     # TEXT_DEHYPHENATE off here (we handle wraps ourselves); expand ligatures
     # so "fi"/"fl" glyphs decode to real letters instead of garbage.
     flags = fitz.TEXTFLAGS_DICT & ~fitz.TEXT_PRESERVE_LIGATURES
@@ -169,27 +173,37 @@ def extract_page(page, doc, img_dir: str, page_num: int) -> list[Element]:
     elements: list[Element] = []
     H = page.rect.height
 
-    # Collect raw image rects, then merge tiled fragments into whole figures.
+    # Raster image rects (tiled fragments will be merged below).
     raw_img_rects = [tuple(b["bbox"]) for b in data["blocks"] if b["type"] == 1]
-    figure_rects = _merge_image_rects(raw_img_rects)
+    text_rects = [tuple(b["bbox"]) for b in data["blocks"] if b["type"] == 0]
 
-    # Detect tables first; their cell text is pulled out so it isn't also
-    # emitted as garbled free-flow paragraphs.
+    # Detect tables; cell text is pulled out so it isn't also emitted as prose.
+    # A "table" that is mostly empty cells is really a line drawing (e.g. a
+    # diagram) — treat its region as a figure instead of a garbled table.
     table_rects: list[tuple] = []
+    fig_region_rects: list[tuple] = list(raw_img_rects)
     try:
-        found = page.find_tables()
-        for tab in found.tables:
-            # Require a genuine grid: >=2 rows and >=2 cols. Single-row "tables"
-            # are almost always ruling lines from diagrams/captions misread as a table.
+        for tab in page.find_tables().tables:
             if tab.row_count < 2 or tab.col_count < 2:
                 continue
-            rows = tab.extract()
-            rows = [[(c or "").strip() for c in row] for row in rows]
-            if any(any(c for c in row) for row in rows):
+            rows = [[(c or "").strip() for c in row] for row in tab.extract()]
+            cells = [c for row in rows for c in row]
+            if not cells:
+                continue
+            empty_ratio = sum(1 for c in cells if not c) / len(cells)
+            if empty_ratio > 0.55:
+                fig_region_rects.append(tuple(tab.bbox))  # line-art, not data
+            else:
                 table_rects.append(tuple(tab.bbox))
                 elements.append(Element("table", tuple(tab.bbox), rows=rows))
     except Exception:
         pass
+
+    # Vector-drawn figures (common in papers): cluster substantial drawing ops
+    # into regions, keep those that look like graphics rather than text/rules.
+    fig_region_rects += _vector_figure_rects(page, text_rects)
+
+    figure_rects = _merge_image_rects(fig_region_rects)
 
     for block in data["blocks"]:
         if block["type"] != 0:
@@ -199,7 +213,9 @@ def extract_page(page, doc, img_dir: str, page_num: int) -> list[Element]:
             if _is_chrome(ln, H):
                 continue  # drop running header / page number
             if any(_rect_contains(tr, ln.bbox) for tr in table_rects):
-                continue  # belongs to a table, already captured
+                continue  # belongs to a real table, already captured
+            if any(_rect_contains(fr, ln.bbox) for fr in figure_rects):
+                continue  # label baked into a figure image — don't duplicate
             lines.append(ln)
         if lines:
             elements.append(Element("text", tuple(block["bbox"]), lines=lines))
@@ -208,15 +224,102 @@ def extract_page(page, doc, img_dir: str, page_num: int) -> list[Element]:
     for i, rect in enumerate(figure_rects, 1):
         clip = fitz.Rect(rect)
         pix = page.get_pixmap(clip=clip, matrix=fitz.Matrix(2, 2))
-        fname = f"page{page_num:03d}_fig{i}.png"
+        fname = f"{prefix}page{page_num:03d}_fig{i}.png"
         fpath = os.path.join(img_dir, fname)
         pix.save(fpath)
         elements.append(Element("image", rect, image_path=fpath))
 
-    # Sort top-to-bottom, then left-to-right, so reading order is preserved
-    # even when PyMuPDF returns blocks out of order.
-    elements.sort(key=lambda e: (round(e.bbox[1] / 3), e.bbox[0]))
-    return elements
+    return _reading_order(elements, page.rect.width)
+
+
+def _rect_overlap_area(a, b) -> float:
+    ox = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    oy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    return ox * oy
+
+
+def _vector_figure_rects(page, text_rects: list[tuple]) -> list[tuple]:
+    """Find vector-drawn figures (diagrams/plots) by clustering drawing ops.
+
+    Gated to avoid capturing rules, table borders, or text columns: a region
+    qualifies only if it is a sizable 2-D block built from several drawing ops
+    and is not mostly covered by text (which would make it a paragraph column).
+    """
+    try:
+        draws = page.get_drawings()
+    except Exception:
+        return []
+    pw, ph = page.rect.width, page.rect.height
+    page_area = pw * ph
+    # Keep only drawing ops with real 2-D extent (skip thin lines / underlines).
+    rects = [(d["rect"].x0, d["rect"].y0, d["rect"].x1, d["rect"].y1)
+             for d in draws
+             if (d["rect"].x1 - d["rect"].x0) > 8 and (d["rect"].y1 - d["rect"].y0) > 8]
+    if len(rects) < 3:
+        return []
+
+    out = []
+    for c in _merge_image_rects(rects):
+        w, h = c[2] - c[0], c[3] - c[1]
+        area = w * h
+        if w < 80 or h < 80 or area < 0.03 * page_area or area > 0.75 * page_area:
+            continue
+        members = sum(1 for r in rects if _rect_overlap_area(c, r) > 0)
+        if members < 4:
+            continue
+        # Reject regions that are mostly text (i.e. a body column, not a figure).
+        text_cover = sum(_rect_overlap_area(c, t) for t in text_rects)
+        if text_cover > 0.45 * area:
+            continue
+        out.append(c)
+    return out
+
+
+def _reading_order(elements: list[Element], page_width: float) -> list[Element]:
+    """Order elements as a human reads them, handling multi-column layouts.
+
+    Single column → simple top-to-bottom. Two columns (common in papers) →
+    full-width elements (titles, wide figures/tables) act as dividers; between
+    them the left column is read fully, then the right column. This avoids the
+    line-by-line column interleaving a naive y-sort produces.
+    """
+    if not elements:
+        return elements
+    mid = page_width / 2
+
+    def width(e):
+        return e.bbox[2] - e.bbox[0]
+
+    def center(e):
+        return (e.bbox[0] + e.bbox[2]) / 2
+
+    narrow = [e for e in elements if width(e) < 0.55 * page_width]
+    left = [e for e in narrow if center(e) < mid]
+    right = [e for e in narrow if center(e) >= mid]
+    two_col = len(left) >= 3 and len(right) >= 3
+
+    if not two_col:
+        return sorted(elements, key=lambda e: (round(e.bbox[1] / 3), e.bbox[0]))
+
+    # Walk top-to-bottom; a full-width element flushes the current column pair.
+    ordered: list[Element] = []
+    segment: list[Element] = []
+
+    def flush():
+        l = sorted((e for e in segment if center(e) < mid), key=lambda e: e.bbox[1])
+        r = sorted((e for e in segment if center(e) >= mid), key=lambda e: e.bbox[1])
+        ordered.extend(l)
+        ordered.extend(r)
+        segment.clear()
+
+    for e in sorted(elements, key=lambda e: e.bbox[1]):
+        if width(e) > 0.55 * page_width:  # spans both columns → divider
+            flush()
+            ordered.append(e)
+        else:
+            segment.append(e)
+    flush()
+    return ordered
 
 
 def _norm_chrome(text: str) -> str:
@@ -257,10 +360,11 @@ def _strip_repeated_chrome(pages: list[list["Element"]], heights: list[float]) -
         els[:] = [e for e in els if e.kind != "text" or e.lines]
 
 
-def extract_pdf(pdf_path: str, img_dir: str, progress=None) -> list[list[Element]]:
+def extract_pdf(pdf_path: str, img_dir: str, progress=None, prefix: str = "") -> list[list[Element]]:
     """Extract every page. Returns a list (per page) of element lists.
 
     progress: optional callback(page_index, page_count) called per page.
+    prefix: namespaces saved figure filenames (for vault merging).
     """
     os.makedirs(img_dir, exist_ok=True)
     doc = fitz.open(pdf_path)
@@ -269,7 +373,7 @@ def extract_pdf(pdf_path: str, img_dir: str, progress=None) -> list[list[Element
     heights = []
     for i, page in enumerate(doc):
         heights.append(page.rect.height)
-        pages.append(extract_page(page, doc, img_dir, i + 1))
+        pages.append(extract_page(page, doc, img_dir, i + 1, prefix=prefix))
         if progress:
             progress(i + 1, n)
     doc.close()

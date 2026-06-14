@@ -117,12 +117,12 @@ PAGE = """<!doctype html>
     <form id="f">
       <label class="drop" id="drop" for="pdf">
         <div class="ico">📄</div>
-        <div class="big" id="droptext">Drop a PDF here, or click to choose</div>
-        <div class="small">stays on the server only long enough to convert</div>
-        <input id="pdf" name="pdf" type="file" accept="application/pdf,.pdf" required>
+        <div class="big" id="droptext">Drop PDFs here, or click to choose</div>
+        <div class="small">one or many — they bundle into a single vault to drop into your existing one</div>
+        <input id="pdf" name="pdf" type="file" accept="application/pdf,.pdf" multiple required>
       </label>
       <div class="title-row">
-        <input id="title" name="title" type="text" placeholder="Note title (optional — defaults to the file name)">
+        <input id="title" name="title" type="text" placeholder="Note title (optional, single file only — defaults to the file name)">
       </div>
       <button id="go" type="submit">Convert to Obsidian vault</button>
       <div class="progress" id="progress"><div class="fill" id="fill"></div></div>
@@ -158,19 +158,23 @@ const droptext = document.getElementById('droptext');
 const titleEl = document.getElementById('title');
 const status = document.getElementById('status');
 
-function setFile(file) {
-  if (!file) return;
-  const dt = new DataTransfer(); dt.items.add(file); pdf.files = dt.files;
+function showFiles(list) {
+  if (!list || !list.length) return;
+  pdf.files = list;
   drop.classList.add('has');
-  droptext.innerHTML = '<span id="fname">' + file.name + '</span>';
-  if (!titleEl.value) titleEl.value = file.name.replace(/\\.pdf$/i, '');
+  if (list.length === 1) {
+    droptext.innerHTML = '<span id="fname">' + list[0].name + '</span>';
+    if (!titleEl.value) titleEl.value = list[0].name.replace(/\\.pdf$/i, '');
+  } else {
+    droptext.innerHTML = '<span id="fname">' + list.length + ' PDFs selected</span>';
+  }
 }
-pdf.addEventListener('change', () => setFile(pdf.files[0]));
+pdf.addEventListener('change', () => showFiles(pdf.files));
 ['dragenter','dragover'].forEach(ev => drop.addEventListener(ev, e => {
   e.preventDefault(); drop.classList.add('over'); }));
 ['dragleave','drop'].forEach(ev => drop.addEventListener(ev, e => {
   e.preventDefault(); drop.classList.remove('over'); }));
-drop.addEventListener('drop', e => { if (e.dataTransfer.files[0]) setFile(e.dataTransfer.files[0]); });
+drop.addEventListener('drop', e => { if (e.dataTransfer.files.length) showFiles(e.dataTransfer.files); });
 
 const progress = document.getElementById('progress');
 const fill = document.getElementById('fill');
@@ -234,39 +238,55 @@ def index():
     return render_template_string(PAGE)
 
 
+def _safe_name(name: str) -> str:
+    return "".join(c for c in name if c.isalnum() or c in " -_").strip() or "vault"
+
+
 @app.post("/convert")
 def convert_endpoint():
-    """Convert in a single request and stream the vault zip back. Kept
-    synchronous on purpose: it works behind any proxy and through free-tier
-    cold starts, unlike a long-lived SSE/job connection."""
-    up = request.files.get("pdf")
-    if not up or not up.filename:
-        return "No PDF uploaded.", 400
+    """Convert one or more PDFs into a single mergeable Obsidian vault and
+    stream it back as a zip: each note at the top level + one shared
+    attachments/ folder. Synchronous on purpose — reliable behind any proxy.
 
-    title = (request.form.get("title") or "").strip() or os.path.splitext(up.filename)[0]
-    safe = "".join(c for c in title if c.isalnum() or c in " -_").strip() or "vault"
+    Drop the unzipped contents into an existing vault: notes are added as pages
+    and attachments merge (figure filenames are namespaced per document, so
+    many papers can live in one vault without colliding).
+    """
+    files = [f for f in request.files.getlist("pdf") if f and f.filename]
+    if not files:
+        return "No PDF uploaded.", 400
+    title_field = (request.form.get("title") or "").strip()
 
     work = tempfile.mkdtemp(prefix="docsidian_")
+    out_dir = os.path.join(work, "vault")  # one shared vault for all uploads
     try:
-        pdf_path = os.path.join(work, "input.pdf")
-        up.save(pdf_path)
-        out_dir = os.path.join(work, safe)
-        res = convert(pdf_path, out_dir, title, to="obsidian")
+        pages = figures = tables = 0
+        for idx, up in enumerate(files):
+            # Only honour a custom title when converting a single file.
+            title = (title_field if (title_field and len(files) == 1)
+                     else os.path.splitext(up.filename)[0])
+            pdf_path = os.path.join(work, f"in{idx}.pdf")
+            up.save(pdf_path)
+            res = convert(pdf_path, out_dir, title, to="obsidian")
+            pages += res["pages"]; figures += res["figures"]; tables += res["tables"]
 
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            for root, _dirs, files in os.walk(out_dir):
-                for name in files:
+            for root, _dirs, names in os.walk(out_dir):
+                for name in names:
                     full = os.path.join(root, name)
-                    arc = os.path.join(safe, os.path.relpath(full, out_dir))
-                    zf.write(full, arc)
+                    zf.write(full, os.path.relpath(full, out_dir))
         buf.seek(0)
 
+        vault_name = (_safe_name(title_field) if (title_field and len(files) == 1)
+                      else (_safe_name(os.path.splitext(files[0].filename)[0])
+                            if len(files) == 1 else "docsidian-vault"))
+        n = len(files)
         resp = send_file(buf, mimetype="application/zip", as_attachment=True,
-                         download_name=f"{safe}.zip")
-        resp.headers["X-Summary"] = (f"{res['pages']} pages · {res['figures']} "
-                                     f"figures · {res['tables']} tables")
-        resp.headers["X-Vault-Name"] = safe
+                         download_name=f"{vault_name}.zip")
+        resp.headers["X-Summary"] = (f"{n} doc{'s' if n > 1 else ''} · {pages} pages · "
+                                     f"{figures} figures · {tables} tables")
+        resp.headers["X-Vault-Name"] = vault_name
         return resp
     except Exception as e:
         return str(e), 500
