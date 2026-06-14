@@ -1,0 +1,27 @@
+name: Sync to Hugging Face Space
+
+# Mirrors the GitHub `main` branch to the HF Space on every push, so the Space
+# always builds the latest code. Requires a repo secret HF_TOKEN (a Hugging
+# Face access token with *write* scope).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:   # allow manual runs from the Actions tab
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # full history so HF gets every commit
+          lfs: true
+
+      - name: Push to Hugging Face Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          git push --force \
+            "https://vibhusapra:${HF_TOKEN}@huggingface.co/spaces/vibhusapra/docsidian" \
+            HEAD:main
