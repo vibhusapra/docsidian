@@ -63,6 +63,13 @@ python3 -m venv .venv
 .venv/bin/python webapp.py
 ```
 
+## Deploy (Hugging Face Spaces)
+
+This repo is a Docker Space: `README.md` carries the HF frontmatter
+(`sdk: docker`, `app_port: 7860`) and the `Dockerfile` runs the Flask app under
+gunicorn on port 7860. Push the repo to a Space's git remote and HF builds and
+serves it — no extra config.
+
 ## Limitations
 
 - **Math/equations** extract as plain text, so complex notation is imperfect —
