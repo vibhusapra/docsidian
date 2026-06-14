@@ -4,7 +4,8 @@ services:
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn webapp:app --bind 0.0.0.0:$PORT --timeout 120 --workers 2
+    # one worker + threads: job/SSE progress state is in-process, so it must be shared
+    startCommand: gunicorn webapp:app --bind 0.0.0.0:$PORT --timeout 120 --workers 1 --threads 8
     envVars:
       - key: PYTHON_VERSION
         value: "3.11.9"

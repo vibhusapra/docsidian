@@ -257,15 +257,21 @@ def _strip_repeated_chrome(pages: list[list["Element"]], heights: list[float]) -
         els[:] = [e for e in els if e.kind != "text" or e.lines]
 
 
-def extract_pdf(pdf_path: str, img_dir: str) -> list[list[Element]]:
-    """Extract every page. Returns a list (per page) of element lists."""
+def extract_pdf(pdf_path: str, img_dir: str, progress=None) -> list[list[Element]]:
+    """Extract every page. Returns a list (per page) of element lists.
+
+    progress: optional callback(page_index, page_count) called per page.
+    """
     os.makedirs(img_dir, exist_ok=True)
     doc = fitz.open(pdf_path)
+    n = doc.page_count
     pages = []
     heights = []
     for i, page in enumerate(doc):
         heights.append(page.rect.height)
         pages.append(extract_page(page, doc, img_dir, i + 1))
+        if progress:
+            progress(i + 1, n)
     doc.close()
     _strip_repeated_chrome(pages, heights)
     return pages

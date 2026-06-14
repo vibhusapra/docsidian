@@ -19,32 +19,40 @@ def convert(pdf: str, out: str, title: str | None = None,
             to: str = "obsidian", progress=None) -> dict:
     """Run the full PDF -> target conversion.
 
-    progress: optional callback(str) for status messages (used by the GUI).
-    Returns a summary dict: {pages, figures, body, note}.
+    progress: optional callback(message: str, fraction: float | None). Fraction
+    is a 0..1 completion estimate; used by the web app's live progress bar.
+    Returns a summary dict: {pages, figures, tables, body, note}.
     """
-    def say(msg):
+    def say(msg, frac=None):
         if progress:
-            progress(msg)
+            progress(msg, frac)
         else:
             print(msg)
+
+    if to != "obsidian":
+        raise NotImplementedError(f"target '{to}' is not supported yet")
 
     title = title or os.path.splitext(os.path.basename(pdf))[0]
     img_dir = os.path.join(out, "attachments")  # extract figures straight into the vault
 
-    say(f"Extracting {os.path.basename(pdf)} …")
-    pages = extract_pdf(pdf, img_dir)
-    body = dominant_body_size(pages)
+    say("Opening PDF …", 0.02)
+    pages = extract_pdf(
+        pdf, img_dir,
+        progress=lambda i, n: say(f"Extracting page {i}/{n} …", 0.05 + 0.60 * i / n))
 
-    say("Rendering Markdown …")
-    pages_blocks = [render_page(els, body) for els in pages]
+    body = dominant_body_size(pages)
+    total = len(pages) or 1
+    pages_blocks = []
+    for idx, els in enumerate(pages, 1):
+        pages_blocks.append(render_page(els, body))
+        say(f"Rendering page {idx}/{total} …", 0.66 + 0.28 * idx / total)
+
     n_imgs = sum(1 for bl in pages_blocks for b in bl if b.type == "image")
     n_tbl = sum(1 for bl in pages_blocks for b in bl if b.type == "table")
-    say(f"{len(pages)} pages · {n_imgs} figures · {n_tbl} tables · body ~{body}pt")
 
-    if to != "obsidian":
-        raise NotImplementedError(f"target '{to}' is not supported yet")
+    say("Writing vault …", 0.96)
     note = write_vault(pages_blocks, out, title)
-    say(f"Wrote: {note}")
+    say(f"Done · {len(pages)} pages · {n_imgs} figures · {n_tbl} tables", 1.0)
 
     return {"pages": len(pages), "figures": n_imgs, "tables": n_tbl,
             "body": body, "note": note}
