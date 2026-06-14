@@ -1,3 +1,13 @@
+---
+title: Docsidian
+emoji: 📄
+colorFrom: indigo
+colorTo: purple
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # Docsidian
 
 Convert a PDF into a ready-to-open **Obsidian** vault — Markdown plus extracted
