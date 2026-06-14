@@ -17,6 +17,7 @@ from flask import Flask, render_template_string, request, send_file
 from port import convert
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MB upload cap
 
 PAGE = """<!doctype html>
 <html lang="en">
