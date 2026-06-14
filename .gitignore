@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Virtualenv / tooling
+.python-version
+
+# Generated output
+out/
+*_out/
+bookout/
+arxiv_test/
+
+# Input/sample PDFs (don't commit copyrighted or large binaries)
+*.pdf
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
