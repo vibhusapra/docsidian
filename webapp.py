@@ -24,63 +24,167 @@ PAGE = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Docsidian</title>
+<title>Docsidian — PDF to Obsidian</title>
 <style>
-  :root { color-scheme: light dark; }
-  body { font-family: -apple-system, system-ui, sans-serif; max-width: 640px;
-         margin: 6vh auto; padding: 0 20px; line-height: 1.5; }
-  h1 { margin-bottom: 4px; }
-  p.sub { color: #888; margin-top: 0; }
-  form { border: 1px solid #8884; border-radius: 12px; padding: 22px; margin-top: 24px; }
-  label { display: block; font-weight: 600; margin: 14px 0 6px; }
-  input[type=text], input[type=file] { width: 100%; padding: 10px; box-sizing: border-box;
-         border: 1px solid #8886; border-radius: 8px; background: transparent; color: inherit; }
-  button { margin-top: 20px; width: 100%; padding: 12px; font-size: 16px; font-weight: 600;
-           border: 0; border-radius: 8px; background: #6c5ce7; color: #fff; cursor: pointer; }
-  button:disabled { opacity: .6; cursor: progress; }
-  #status { margin-top: 18px; white-space: pre-wrap; font-family: ui-monospace, monospace;
-            font-size: 13px; color: #888; }
+  *, *::before, *::after { box-sizing: border-box; }
+  :root {
+    --bg: #0b0b12; --card: rgba(22,22,33,.72); --line: rgba(255,255,255,.10);
+    --ink: #e9e9f1; --mut: #9a9ab0; --accent: #7c5cff; --accent2: #21d4a8;
+  }
+  html, body { margin: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    color: var(--ink); background: var(--bg); line-height: 1.55;
+    min-height: 100vh; overflow-x: hidden;
+  }
+  /* animated gradient mesh */
+  body::before {
+    content: ""; position: fixed; inset: -30vmax; z-index: -1;
+    background:
+      radial-gradient(40vmax 40vmax at 18% 12%, #7c5cff55, transparent 60%),
+      radial-gradient(38vmax 38vmax at 86% 22%, #21d4a844, transparent 60%),
+      radial-gradient(45vmax 45vmax at 60% 95%, #ff5ca833, transparent 60%);
+    filter: blur(14px); animation: drift 22s ease-in-out infinite alternate;
+  }
+  @keyframes drift { to { transform: translate3d(2%, -3%, 0) rotate(8deg) scale(1.08); } }
+
+  .wrap { max-width: 760px; margin: 0 auto; padding: 7vh 22px 10vh; }
+  .badge { display:inline-flex; gap:8px; align-items:center; font-size:12px; letter-spacing:.5px;
+    text-transform:uppercase; color:var(--mut); border:1px solid var(--line);
+    padding:6px 12px; border-radius:999px; background:rgba(255,255,255,.03); }
+  .badge .dot { width:7px; height:7px; border-radius:50%; background:var(--accent2);
+    box-shadow:0 0 10px var(--accent2); }
+  h1 { font-size: clamp(34px, 6vw, 52px); line-height:1.05; margin:18px 0 8px; letter-spacing:-1.2px; }
+  h1 .grad { background:linear-gradient(100deg,var(--accent),var(--accent2)); -webkit-background-clip:text;
+    background-clip:text; color:transparent; }
+  .lede { color:var(--mut); font-size:18px; max-width:54ch; margin:0; }
+
+  .card { margin-top:30px; background:var(--card); border:1px solid var(--line); border-radius:20px;
+    padding:26px; backdrop-filter:blur(16px); -webkit-backdrop-filter:blur(16px);
+    box-shadow:0 24px 60px -28px rgba(0,0,0,.8); }
+
+  .drop { border:1.5px dashed var(--line); border-radius:16px; padding:34px 20px; text-align:center;
+    cursor:pointer; transition:.18s border-color,.18s background,.18s transform; }
+  .drop:hover { border-color:var(--accent); background:rgba(124,92,255,.06); }
+  .drop.over { border-color:var(--accent2); background:rgba(33,212,168,.08); transform:scale(1.01); }
+  .drop .ico { font-size:34px; }
+  .drop .big { font-weight:650; font-size:17px; margin-top:8px; }
+  .drop .small { color:var(--mut); font-size:13px; margin-top:4px; }
+  .drop.has { border-style:solid; border-color:var(--accent); background:rgba(124,92,255,.08); }
+  #fname { font-weight:650; color:var(--accent2); }
+  input[type=file] { display:none; }
+
+  .title-row { margin-top:16px; }
+  .title-row input { width:100%; padding:12px 14px; border-radius:12px; color:var(--ink);
+    border:1px solid var(--line); background:rgba(255,255,255,.03); font-size:15px; }
+  .title-row input::placeholder { color:#6a6a82; }
+
+  button { margin-top:18px; width:100%; padding:15px; font-size:16px; font-weight:700; cursor:pointer;
+    border:0; border-radius:13px; color:#fff; letter-spacing:.2px;
+    background:linear-gradient(100deg,var(--accent),#9b7bff); transition:.16s transform,.16s filter; }
+  button:hover:not(:disabled){ transform:translateY(-1px); filter:brightness(1.07); }
+  button:disabled { opacity:.7; cursor:progress; }
+
+  #status { margin-top:16px; font-size:14px; min-height:20px; }
+  #status.ok { color:var(--accent2); } #status.err { color:#ff6b8a; }
+  .spin { display:inline-block; width:14px; height:14px; vertical-align:-2px; margin-right:8px;
+    border:2px solid #ffffff44; border-top-color:#fff; border-radius:50%; animation:sp .7s linear infinite; }
+  @keyframes sp { to { transform:rotate(360deg); } }
+
+  .feat-h { margin:46px 0 4px; font-size:13px; letter-spacing:1px; text-transform:uppercase; color:var(--mut); }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:12px; margin-top:14px; }
+  .feat { border:1px solid var(--line); border-radius:14px; padding:15px 16px; background:rgba(255,255,255,.02); }
+  .feat .t { font-weight:650; font-size:15px; display:flex; gap:8px; align-items:center; }
+  .feat .t .ck { color:var(--accent2); }
+  .feat .d { color:var(--mut); font-size:13px; margin-top:5px; }
+  .foot { margin-top:40px; color:#6a6a82; font-size:13px; text-align:center; }
+  .foot code { color:var(--mut); background:rgba(255,255,255,.05); padding:2px 7px; border-radius:6px; }
 </style>
 </head>
 <body>
-  <h1>Docsidian</h1>
-  <p class="sub">Drop a PDF → download a ready-to-open Obsidian vault (Markdown + figures).</p>
+<div class="wrap">
+  <span class="badge"><span class="dot"></span> No LLM · runs on direct extraction</span>
+  <h1>PDF in. <span class="grad">Obsidian out.</span></h1>
+  <p class="lede">Drop a PDF and get back a ready-to-open vault — clean Markdown plus
+     every figure, with the structure that usually gets mangled left intact.</p>
 
-  <form id="f">
-    <label for="pdf">PDF file</label>
-    <input id="pdf" name="pdf" type="file" accept="application/pdf,.pdf" required>
+  <div class="card">
+    <form id="f">
+      <label class="drop" id="drop" for="pdf">
+        <div class="ico">📄</div>
+        <div class="big" id="droptext">Drop a PDF here, or click to choose</div>
+        <div class="small">stays on the server only long enough to convert</div>
+        <input id="pdf" name="pdf" type="file" accept="application/pdf,.pdf" required>
+      </label>
+      <div class="title-row">
+        <input id="title" name="title" type="text" placeholder="Note title (optional — defaults to the file name)">
+      </div>
+      <button id="go" type="submit">Convert to Obsidian vault</button>
+      <div id="status"></div>
+    </form>
+  </div>
 
-    <label for="title">Note title <span style="font-weight:400;color:#888">(optional)</span></label>
-    <input id="title" name="title" type="text" placeholder="defaults to the file name">
+  <div class="feat-h">What it handles</div>
+  <div class="grid">
+    <div class="feat"><div class="t"><span class="ck">✓</span> Heading hierarchy</div>
+      <div class="d">Chapters → sections → subsections, inferred from font size & numbering.</div></div>
+    <div class="feat"><div class="t"><span class="ck">✓</span> Inline formatting</div>
+      <div class="d"><b>Bold</b>, <i>italic</i>, and <code>code</code> spans preserved exactly.</div></div>
+    <div class="feat"><div class="t"><span class="ck">✓</span> Figures &amp; charts</div>
+      <div class="d">Tiled images reassembled and embedded as <code>![[wikilinks]]</code>.</div></div>
+    <div class="feat"><div class="t"><span class="ck">✓</span> Tables</div>
+      <div class="d">Real grids become Markdown tables; diagram false-positives dropped.</div></div>
+    <div class="feat"><div class="t"><span class="ck">✓</span> Clean text</div>
+      <div class="d">Page numbers & running headers stripped; ligatures &amp; accents repaired.</div></div>
+    <div class="feat"><div class="t"><span class="ck">✓</span> Table of contents</div>
+      <div class="d">Dotted-leader entries rebuilt as a nested, indented list.</div></div>
+  </div>
 
-    <button id="go" type="submit">Convert</button>
-    <div id="status"></div>
-  </form>
+  <div class="foot">Unzip the result and use <code>Open folder as vault</code> in Obsidian.</div>
+</div>
 
 <script>
 const f = document.getElementById('f');
 const go = document.getElementById('go');
+const drop = document.getElementById('drop');
+const pdf = document.getElementById('pdf');
+const droptext = document.getElementById('droptext');
+const titleEl = document.getElementById('title');
 const status = document.getElementById('status');
+
+function setFile(file) {
+  if (!file) return;
+  const dt = new DataTransfer(); dt.items.add(file); pdf.files = dt.files;
+  drop.classList.add('has');
+  droptext.innerHTML = '<span id="fname">' + file.name + '</span>';
+  if (!titleEl.value) titleEl.value = file.name.replace(/\\.pdf$/i, '');
+}
+pdf.addEventListener('change', () => setFile(pdf.files[0]));
+['dragenter','dragover'].forEach(ev => drop.addEventListener(ev, e => {
+  e.preventDefault(); drop.classList.add('over'); }));
+['dragleave','drop'].forEach(ev => drop.addEventListener(ev, e => {
+  e.preventDefault(); drop.classList.remove('over'); }));
+drop.addEventListener('drop', e => { if (e.dataTransfer.files[0]) setFile(e.dataTransfer.files[0]); });
 
 f.addEventListener('submit', async (e) => {
   e.preventDefault();
-  const data = new FormData(f);
-  if (!data.get('pdf') || !data.get('pdf').name) { status.textContent = 'Choose a PDF first.'; return; }
-  go.disabled = true; go.textContent = 'Converting…'; status.textContent = 'Extracting and rendering…';
+  if (!pdf.files[0]) { status.className='err'; status.textContent='Choose a PDF first.'; return; }
+  go.disabled = true; go.innerHTML = '<span class="spin"></span>Converting…';
+  status.className=''; status.innerHTML = '<span class="spin"></span>Extracting text, figures & tables…';
   try {
-    const res = await fetch('/convert', { method: 'POST', body: data });
-    if (!res.ok) { status.textContent = '❌ ' + (await res.text()); return; }
+    const res = await fetch('/convert', { method:'POST', body:new FormData(f) });
+    if (!res.ok) { status.className='err'; status.textContent='⚠ ' + (await res.text()); return; }
     const blob = await res.blob();
     const name = (res.headers.get('X-Vault-Name') || 'vault') + '.zip';
     const url = URL.createObjectURL(blob);
-    const a = document.createElement('a'); a.href = url; a.download = name; a.click();
+    const a = document.createElement('a'); a.href=url; a.download=name; a.click();
     URL.revokeObjectURL(url);
-    status.textContent = '✅ ' + (res.headers.get('X-Summary') || 'Done') +
-      '\\nDownloaded ' + name + ' — unzip it and open the folder as a vault in Obsidian.';
+    status.className='ok';
+    status.textContent = '✓ ' + (res.headers.get('X-Summary') || 'Done') + ' — downloaded ' + name;
   } catch (err) {
-    status.textContent = '❌ ' + err;
+    status.className='err'; status.textContent = '⚠ ' + err;
   } finally {
-    go.disabled = false; go.textContent = 'Convert';
+    go.disabled = false; go.textContent = 'Convert to Obsidian vault';
   }
 });
 </script>
