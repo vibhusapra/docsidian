@@ -22,6 +22,7 @@ class Run:
     mono: bool = False     # monospace / code font (also the green inline-code spans)
     size: float = 0.0
     black: bool = False    # extra-heavy weight (e.g. Helvetica Black) — chapter/section labels
+    link: str = ""         # destination URL if this span sits under a hyperlink
 
 
 @dataclass
@@ -79,7 +80,19 @@ class Element:
         return any(l.is_bold for l in self.lines)
 
 
-def _span_run(span) -> Run:
+def _span_link(span, links: list) -> str:
+    """URL of the hyperlink covering this span, if any (by bbox overlap)."""
+    if not links:
+        return ""
+    bx0, by0, bx1, by1 = span["bbox"]
+    cx, cy = (bx0 + bx1) / 2, (by0 + by1) / 2
+    for (rx0, ry0, rx1, ry1), uri in links:
+        if rx0 <= cx <= rx1 and ry0 <= cy <= ry1:
+            return uri
+    return ""
+
+
+def _span_run(span, links: list = ()) -> Run:
     font = span["font"]
     fl = font.lower()
     flags = span["flags"]
@@ -90,14 +103,15 @@ def _span_run(span) -> Run:
         mono=bool(flags & 8) or "courier" in fl or "mono" in fl or "consol" in fl,
         size=round(span["size"], 1),
         black="blk" in fl or "black" in fl,
+        link=_span_link(span, links),
     )
 
 
-def _block_lines(block) -> list:
+def _block_lines(block, links: list = ()) -> list:
     """Return structured Line objects (with styled Runs) for a text block."""
     lines = []
     for line in block.get("lines", []):
-        runs = [_span_run(s) for s in line.get("spans", []) if s["text"]]
+        runs = [_span_run(s, links) for s in line.get("spans", []) if s["text"]]
         if runs:
             lines.append(Line(runs=runs, bbox=tuple(line["bbox"])))
     return lines
@@ -170,6 +184,8 @@ def extract_page(page, doc, img_dir: str, page_num: int, prefix: str = "") -> li
     # so "fi"/"fl" glyphs decode to real letters instead of garbage.
     flags = fitz.TEXTFLAGS_DICT & ~fitz.TEXT_PRESERVE_LIGATURES
     data = page.get_text("dict", flags=flags)
+    # External hyperlinks on the page → (rect, uri) for span-level matching.
+    links = [(tuple(l["from"]), l["uri"]) for l in page.get_links() if l.get("uri")]
     elements: list[Element] = []
     H = page.rect.height
 
@@ -209,7 +225,7 @@ def extract_page(page, doc, img_dir: str, page_num: int, prefix: str = "") -> li
         if block["type"] != 0:
             continue
         lines = []
-        for ln in _block_lines(block):
+        for ln in _block_lines(block, links):
             if _is_chrome(ln, H):
                 continue  # drop running header / page number
             if any(_rect_contains(tr, ln.bbox) for tr in table_rects):

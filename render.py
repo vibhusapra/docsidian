@@ -156,39 +156,53 @@ def _emph(s: str, mark: str) -> str:
 
 
 def _same_style(a: Run, b: Run) -> bool:
-    return (a.bold or a.black) == (b.bold or b.black) and a.italic == b.italic and a.mono == b.mono
+    return ((a.bold or a.black) == (b.bold or b.black) and a.italic == b.italic
+            and a.mono == b.mono and a.link == b.link)
 
 
 def runs_to_md(runs: list[Run]) -> str:
-    """Convert styled runs to inline Markdown (**bold**, *italic*, `code`)."""
+    """Convert styled runs to inline Markdown (**bold**, *italic*, `code`, [links])."""
     # Merge adjacent same-style runs so we don't emit '**a****b**'.
     merged: list[Run] = []
     for r in runs:
         if merged and _same_style(merged[-1], r):
-            merged[-1] = Run(merged[-1].text + r.text, r.bold, r.italic, r.mono, r.size, r.black)
+            merged[-1] = Run(merged[-1].text + r.text, r.bold, r.italic, r.mono,
+                             r.size, r.black, r.link)
         else:
-            merged.append(Run(r.text, r.bold, r.italic, r.mono, r.size, r.black))
+            merged.append(Run(r.text, r.bold, r.italic, r.mono, r.size, r.black, r.link))
 
     parts = []
     for r in merged:
         if r.mono:  # inline code — never reflow/clean its contents
-            parts.append(_emph(r.text, "`"))
-            continue
-        t = clean_text(r.text)
-        # Don't emphasize lone symbols (∗ † ‡ µ · …): styling them just adds
-        # clutter like '*∗*'. Only emphasize runs containing real letters/digits.
-        has_word = bool(re.search(r"[A-Za-z0-9]", t))
-        if not has_word:
-            parts.append(t)
-        elif (r.bold or r.black) and r.italic:
-            parts.append(_emph(t, "***"))
-        elif r.bold or r.black:
-            parts.append(_emph(t, "**"))
-        elif r.italic:
-            parts.append(_emph(t, "*"))
+            piece = _emph(r.text, "`")
         else:
-            parts.append(t)
+            t = clean_text(r.text)
+            # Don't emphasize lone symbols (∗ † ‡ µ · …): styling them just adds
+            # clutter like '*∗*'. Only emphasize runs with real letters/digits.
+            has_word = bool(re.search(r"[A-Za-z0-9]", t))
+            if not has_word:
+                piece = t
+            elif (r.bold or r.black) and r.italic:
+                piece = _emph(t, "***")
+            elif r.bold or r.black:
+                piece = _emph(t, "**")
+            elif r.italic:
+                piece = _emph(t, "*")
+            else:
+                piece = t
+        if r.link and r.text.strip():
+            piece = _linkify(piece, r.link)
+        parts.append(piece)
     return "".join(parts)
+
+
+def _linkify(piece: str, url: str) -> str:
+    """Wrap rendered text in a Markdown link, keeping outer spaces outside."""
+    lead = piece[: len(piece) - len(piece.lstrip())]
+    trail = piece[len(piece.rstrip()):]
+    core = piece.strip()
+    safe = url.replace(" ", "%20").replace("(", "%28").replace(")", "%29")
+    return f"{lead}[{core}]({safe}){trail}"
 
 
 _TOC_ENTRY = re.compile(r"\.{3,}\s*\d{1,3}\s*$")
