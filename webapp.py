@@ -118,7 +118,7 @@ PAGE = """<!doctype html>
       <label class="drop" id="drop" for="pdf">
         <div class="ico">📄</div>
         <div class="big" id="droptext">Drop PDFs here, or click to choose</div>
-        <div class="small">one or many — they bundle into a single vault to drop into your existing one</div>
+        <div class="small">one or many — you get two drop-in folders (notes + attachments) for your existing vault</div>
         <input id="pdf" name="pdf" type="file" accept="application/pdf,.pdf" multiple required>
       </label>
       <div class="title-row">
@@ -146,7 +146,7 @@ PAGE = """<!doctype html>
       <div class="d">Dotted-leader entries rebuilt as a nested, indented list.</div></div>
   </div>
 
-  <div class="foot">Unzip the result and use <code>Open folder as vault</code> in Obsidian.</div>
+  <div class="foot">Unzip and drag both folders — the notes folder and <code>attachments/</code> — into your existing vault.</div>
 </div>
 
 <script>
@@ -245,12 +245,13 @@ def _safe_name(name: str) -> str:
 @app.post("/convert")
 def convert_endpoint():
     """Convert one or more PDFs into a single mergeable Obsidian vault and
-    stream it back as a zip: each note at the top level + one shared
-    attachments/ folder. Synchronous on purpose — reliable behind any proxy.
+    stream it back as a zip with two drop-in folders: a notes folder with the
+    page(s) and an attachments/ folder with every figure. Synchronous on
+    purpose — reliable behind any proxy.
 
-    Drop the unzipped contents into an existing vault: notes are added as pages
-    and attachments merge (figure filenames are namespaced per document, so
-    many papers can live in one vault without colliding).
+    Move both folders into an existing vault: notes are added as pages and
+    attachments merge (figure filenames are namespaced per document, so many
+    papers can live in one vault without colliding).
     """
     files = [f for f in request.files.getlist("pdf") if f and f.filename]
     if not files:
@@ -270,18 +271,30 @@ def convert_endpoint():
             res = convert(pdf_path, out_dir, title, to="obsidian")
             pages += res["pages"]; figures += res["figures"]; tables += res["tables"]
 
+        n = len(files)
+        notes_folder = (_safe_name(title_field) if (title_field and n == 1)
+                        else (_safe_name(os.path.splitext(files[0].filename)[0])
+                              if n == 1 else "Docsidian Notes"))
+
+        # Zip as two clean, drop-in folders so nothing has to be hand-sorted:
+        #   <notes_folder>/  -> the markdown page(s)
+        #   attachments/     -> every figure (filenames namespaced per document)
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for root, _dirs, names in os.walk(out_dir):
                 for name in names:
                     full = os.path.join(root, name)
-                    zf.write(full, os.path.relpath(full, out_dir))
+                    rel = os.path.relpath(full, out_dir)
+                    if rel.split(os.sep)[0] == "attachments":
+                        arc = rel                      # keep attachments/ at top level
+                    elif name.endswith(".md"):
+                        arc = os.path.join(notes_folder, name)  # notes into their folder
+                    else:
+                        arc = rel
+                    zf.write(full, arc)
         buf.seek(0)
 
-        vault_name = (_safe_name(title_field) if (title_field and len(files) == 1)
-                      else (_safe_name(os.path.splitext(files[0].filename)[0])
-                            if len(files) == 1 else "docsidian-vault"))
-        n = len(files)
+        vault_name = notes_folder if n == 1 else "docsidian-vault"
         resp = send_file(buf, mimetype="application/zip", as_attachment=True,
                          download_name=f"{vault_name}.zip")
         resp.headers["X-Summary"] = (f"{n} doc{'s' if n > 1 else ''} · {pages} pages · "
