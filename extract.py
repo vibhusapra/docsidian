@@ -221,6 +221,12 @@ def extract_page(page, doc, img_dir: str, page_num: int, prefix: str = "") -> li
 
     figure_rects = _merge_image_rects(fig_region_rects)
 
+    # Borderless tables (no ruling lines) reconstructed from column-aligned text.
+    borderless = _borderless_tables(page, table_rects + list(figure_rects))
+    for bt in borderless:
+        table_rects.append(bt.bbox)
+        elements.append(bt)
+
     for block in data["blocks"]:
         if block["type"] != 0:
             continue
@@ -246,6 +252,142 @@ def extract_page(page, doc, img_dir: str, page_num: int, prefix: str = "") -> li
         elements.append(Element("image", rect, image_path=fpath))
 
     return _reading_order(elements, page.rect.width)
+
+
+def _cluster_centers(values: list[float], tol: float) -> list[float]:
+    """Group nearby values into clusters; return each cluster's mean."""
+    if not values:
+        return []
+    values = sorted(values)
+    groups = [[values[0]]]
+    for v in values[1:]:
+        if v - groups[-1][-1] <= tol:
+            groups[-1].append(v)
+        else:
+            groups.append([v])
+    return [sum(g) / len(g) for g in groups]
+
+
+def _row_cells(spans: list) -> list:
+    """Spans on the same row merged into cells (adjacent spans w/ small gap join).
+    spans: list of (x0, x1, text), unordered."""
+    spans = sorted(spans)
+    cells = [list(spans[0])]
+    for x0, x1, t in spans[1:]:
+        if x0 - cells[-1][1] <= 12:          # same cell — small gap
+            cells[-1][1] = x1
+            cells[-1][2] = (cells[-1][2] + " " + t).strip()
+        else:
+            cells.append([x0, x1, t])
+    return cells
+
+
+def _borderless_tables(page, covered: list[tuple]) -> list[Element]:
+    """Detect tables that have no ruling lines, by column-aligned text.
+
+    Table cells are often laid out as separate text blocks sharing a row, so we
+    gather every span, group spans into rows by vertical position, and look for
+    runs of consecutive rows whose cells line up into >= 3 shared columns.
+    Conservative (>=3 columns, >=2 rows, consistent alignment) so prose and
+    lists are never turned into tables.
+    """
+    spans = []
+    for b in page.get_text("dict")["blocks"]:
+        if b["type"] != 0:
+            continue
+        for l in b["lines"]:
+            for s in l["spans"]:
+                t = s["text"].strip()
+                if t:
+                    x0, y0, x1, y1 = s["bbox"]
+                    spans.append((y0, y1, x0, x1, t))
+    if len(spans) < 6:
+        return []
+
+    # Group spans into rows by vertical overlap (tolerance from median height).
+    heights = sorted(s[1] - s[0] for s in spans)
+    row_tol = max(3.0, 0.5 * heights[len(heights) // 2])
+    spans.sort(key=lambda s: ((s[0] + s[1]) / 2, s[2]))
+    rows = []  # (y0, y1, [cells])
+    cur, cur_yc = [], None
+    for y0, y1, x0, x1, t in spans:
+        yc = (y0 + y1) / 2
+        if cur_yc is None or abs(yc - cur_yc) <= row_tol:
+            cur.append((x0, x1, t))
+            cur_yc = yc if cur_yc is None else (cur_yc + yc) / 2
+        else:
+            cells = _row_cells(cur)
+            if len(cells) >= 3:
+                ys = cur_yc
+                rows.append((ys - row_tol, ys + row_tol, cells))
+            cur, cur_yc = [(x0, x1, t)], yc
+    if len(cur) >= 1:
+        cells = _row_cells(cur)
+        if len(cells) >= 3:
+            rows.append((cur_yc - row_tol, cur_yc + row_tol, cells))
+    rows.sort()
+    if len(rows) < 2:
+        return []
+
+    # Group consecutive tabular rows into bands (small vertical gaps).
+    bands = [[rows[0]]]
+    for r in rows[1:]:
+        prev = bands[-1][-1]
+        line_h = max(prev[1] - prev[0], 8)
+        if r[0] - prev[1] <= 2.2 * line_h:
+            bands[-1].append(r)
+        else:
+            bands.append([r])
+
+    out = []
+    for band in bands:
+        if len(band) < 2:
+            continue
+        x0 = min(c[0] for _, _, cells in band for c in cells)
+        x1 = max(c[1] for _, _, cells in band for c in cells)
+        y0 = band[0][0]
+        y1 = band[-1][1]
+        bbox = (x0, y0, x1, y1)
+        if any(_rect_overlap_area(bbox, c) > 0.3 * (x1 - x0) * (y1 - y0) for c in covered):
+            continue  # already a ruled table or a figure
+
+        # Rows of a real table have a consistent cell count. Irregular counts
+        # mean overlapping/garbled text (e.g. math, or 2-column bleed) — reject.
+        counts = [len(cells) for _, _, cells in band]
+        modal = max(set(counts), key=counts.count)
+        if modal < 3 or sum(1 for n in counts if abs(n - modal) <= 1) < 0.7 * len(counts):
+            continue
+
+        centers = [(c[0] + c[1]) / 2 for _, _, cells in band for c in cells]
+        cols = _cluster_centers(centers, tol=18)
+        if len(cols) < 3 or len(cols) > modal + 2:
+            continue
+        # Build the grid: assign each cell to its nearest column.
+        grid = []
+        collision = False
+        for _, _, cells in band:
+            row = [""] * len(cols)
+            for cx0, cx1, t in cells:
+                cc = (cx0 + cx1) / 2
+                j = min(range(len(cols)), key=lambda k: abs(cols[k] - cc))
+                if row[j]:
+                    collision = True  # two cells fight for one column → not a clean grid
+                row[j] = (row[j] + " " + t).strip() if row[j] else t
+            grid.append(row)
+        if collision:
+            continue
+        # Require most rows to actually fill most columns (real table, not noise).
+        fill = sum(sum(1 for c in r if c) for r in grid) / (len(grid) * len(cols))
+        if fill < 0.55:
+            continue
+        # Real table cells are short tokens (numbers, labels). Any prose means
+        # column-aligned body text bled in — reject rather than garble.
+        filled = [c for r in grid for c in r if c]
+        prose = sum(1 for c in filled if len(c) > 28 or len(c.split()) >= 6)
+        if filled and prose / len(filled) > 0.05:
+            continue
+        out.append(Element("table", bbox, rows=grid))
+    return out
 
 
 def _rect_overlap_area(a, b) -> float:
