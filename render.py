@@ -109,10 +109,36 @@ class Block:
 
 _DOT_LEADER = re.compile(r"\s*\.{4,}\s*")
 
+# Some PDFs emit accents as a spacing modifier glyph placed *before* the base
+# letter (e.g. 'G¨odel' for 'Gödel'). Recombine accent + letter into the proper
+# precomposed character. ASCII ` ^ ~ are excluded — they're common in code/math.
+_ACCENTS = {
+    "¨": "̈",  # ¨ diaeresis
+    "´": "́",  # ´ acute
+    "ˆ": "̂",  # ˆ circumflex
+    "˜": "̃",  # ˜ small tilde
+    "˚": "̊",  # ˚ ring
+    "¯": "̄",  # ¯ macron
+    "¸": "̧",  # ¸ cedilla
+}
+_ACC = "".join(_ACCENTS)
+_ACCENT_BEFORE = re.compile("([" + _ACC + r"])([A-Za-z])")   # '¨o' -> 'ö'
+_ACCENT_AFTER = re.compile("([A-Za-z])([" + _ACC + "])")      # 'u¨' -> 'ü'
+
+
+def fix_diacritics(text: str) -> str:
+    import unicodedata
+    text = _ACCENT_BEFORE.sub(
+        lambda m: unicodedata.normalize("NFC", m.group(2) + _ACCENTS[m.group(1)]), text)
+    text = _ACCENT_AFTER.sub(
+        lambda m: unicodedata.normalize("NFC", m.group(1) + _ACCENTS[m.group(2)]), text)
+    return text
+
 
 def clean_text(text: str) -> str:
     """Run all per-block text cleanups: ligature repair + dot-leader collapse."""
     text = repair_ligatures(text)
+    text = fix_diacritics(text)        # 'G¨odel' -> 'Gödel'
     text = _DOT_LEADER.sub(" ", text)  # TOC dotted leaders -> single space
     text = text.replace("\t", " ")     # stray tabs (e.g. TOC numbering) -> space
     text = re.sub(r"  +", " ", text)   # collapse runs of spaces
@@ -149,7 +175,12 @@ def runs_to_md(runs: list[Run]) -> str:
             parts.append(_emph(r.text, "`"))
             continue
         t = clean_text(r.text)
-        if (r.bold or r.black) and r.italic:
+        # Don't emphasize lone symbols (∗ † ‡ µ · …): styling them just adds
+        # clutter like '*∗*'. Only emphasize runs containing real letters/digits.
+        has_word = bool(re.search(r"[A-Za-z0-9]", t))
+        if not has_word:
+            parts.append(t)
+        elif (r.bold or r.black) and r.italic:
             parts.append(_emph(t, "***"))
         elif r.bold or r.black:
             parts.append(_emph(t, "**"))
@@ -295,6 +326,9 @@ def render_page(elements: list[Element], body_size: float) -> list[Block]:
 _NUM_ONLY = re.compile(r"^\d+(\.\d+)*$")
 _NUM_PREFIX = re.compile(r"^(\d+(?:\.\d+)*)\s+")
 _CHAPTER_LABEL = re.compile(r"^CHAPTER\s+(\d+)\s*$", re.IGNORECASE)
+# A fully-bold paragraph that begins with a sub-section number, e.g.
+# '**1.1. Humans are the bottleneck.**' — a run-in heading. Promote to a heading.
+_BOLD_SUBSEC = re.compile(r"^\*\*\s*(\d+(?:\.\d+)+)\.?\s+(.+?)\.?\s*\*\*\.?\s*$")
 
 
 def fix_headings(blocks: list[Block]) -> list[Block]:
@@ -309,6 +343,17 @@ def fix_headings(blocks: list[Block]) -> list[Block]:
     i = 0
     while i < len(blocks):
         b = blocks[i]
+        # Promote a fully-bold run-in subsection label to a real heading.
+        if b.type == "paragraph":
+            sm = _BOLD_SUBSEC.match(b.text.strip())
+            if sm:
+                num, title = sm.group(1), sm.group(2)
+                lvl = min(2 + num.count("."), 6)  # 1.1 -> h3, 1.1.1 -> h4
+                hb = Block("heading", text=f"{num}. {title}")
+                hb.level = lvl
+                out.append(hb)
+                i += 1
+                continue
         if b.type == "heading" and _NUM_ONLY.match(b.text.strip()):
             num = b.text.strip()
             if i + 1 < len(blocks) and blocks[i + 1].type == "heading":

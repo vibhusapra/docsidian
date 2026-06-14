@@ -179,6 +179,10 @@ def extract_page(page, doc, img_dir: str, page_num: int) -> list[Element]:
     try:
         found = page.find_tables()
         for tab in found.tables:
+            # Require a genuine grid: >=2 rows and >=2 cols. Single-row "tables"
+            # are almost always ruling lines from diagrams/captions misread as a table.
+            if tab.row_count < 2 or tab.col_count < 2:
+                continue
             rows = tab.extract()
             rows = [[(c or "").strip() for c in row] for row in rows]
             if any(any(c for c in row) for row in rows):
@@ -215,14 +219,55 @@ def extract_page(page, doc, img_dir: str, page_num: int) -> list[Element]:
     return elements
 
 
+def _norm_chrome(text: str) -> str:
+    """Normalize a line for repeated-header matching (drop digits & case)."""
+    return re.sub(r"\d+", "", text).lower().strip()
+
+
+def _strip_repeated_chrome(pages: list[list["Element"]], heights: list[float]) -> None:
+    """Remove running headers/footers: short lines in the top/bottom margin band
+    whose text repeats across many pages (page-number variations ignored)."""
+    counts: dict[str, int] = {}
+    for els, H in zip(pages, heights):
+        seen = set()
+        for e in els:
+            if e.kind != "text":
+                continue
+            for ln in e.lines:
+                frac = ln.bbox[1] / H if H else 0.5
+                if (frac < 0.12 or frac > 0.88) and len(ln.text.strip()) < 90:
+                    key = _norm_chrome(ln.text)
+                    if key and key not in seen:
+                        counts[key] = counts.get(key, 0) + 1
+                        seen.add(key)
+    if not pages:
+        return
+    threshold = max(3, int(0.2 * len(pages)))
+    repeated = {k for k, n in counts.items() if n >= threshold}
+    if not repeated:
+        return
+    for els, H in zip(pages, heights):
+        for e in els:
+            if e.kind != "text":
+                continue
+            e.lines = [ln for ln in e.lines
+                       if not ((ln.bbox[1] / H < 0.12 or ln.bbox[1] / H > 0.88)
+                               and _norm_chrome(ln.text) in repeated)]
+        # drop now-empty text elements
+        els[:] = [e for e in els if e.kind != "text" or e.lines]
+
+
 def extract_pdf(pdf_path: str, img_dir: str) -> list[list[Element]]:
     """Extract every page. Returns a list (per page) of element lists."""
     os.makedirs(img_dir, exist_ok=True)
     doc = fitz.open(pdf_path)
     pages = []
+    heights = []
     for i, page in enumerate(doc):
+        heights.append(page.rect.height)
         pages.append(extract_page(page, doc, img_dir, i + 1))
     doc.close()
+    _strip_repeated_chrome(pages, heights)
     return pages
 
 

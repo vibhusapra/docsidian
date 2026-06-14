@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 import shutil
 
-from render import Block
+from render import Block, clean_text
 
 
 def _table_md(rows: list) -> str:
@@ -18,7 +18,8 @@ def _table_md(rows: list) -> str:
         return ""
     ncol = max(len(r) for r in rows)
     def fmt(r):
-        cells = [(c or "").replace("\n", " ").replace("|", "\\|").strip() for c in r]
+        cells = [clean_text((c or "").replace("\n", " ")).replace("|", "\\|").strip()
+                 for c in r]
         cells += [""] * (ncol - len(cells))
         return "| " + " | ".join(cells) + " |"
     out = [fmt(rows[0]), "| " + " | ".join(["---"] * ncol) + " |"]
