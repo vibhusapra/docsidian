@@ -23,19 +23,15 @@ PDF ──> extract ──> render ──> Obsidian vault
 | `port.py` | Shared `convert()` pipeline + a CLI. |
 | `webapp.py` | Small Flask UI: upload a PDF, download the vault as a zip. |
 
-## Setup
-
-```bash
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-```
-
 ## Use
+
+With [uv](https://docs.astral.sh/uv/) — no setup needed, it resolves deps from
+the lockfile on first run.
 
 ### Web app (recommended)
 
 ```bash
-.venv/bin/python webapp.py
+uv run webapp.py
 ```
 
 Open <http://127.0.0.1:5001>, choose a PDF, click **Convert**, and a
@@ -44,10 +40,18 @@ Open <http://127.0.0.1:5001>, choose a PDF, click **Convert**, and a
 ### Command line
 
 ```bash
-.venv/bin/python port.py paper.pdf --out my_vault --title "Paper Title"
+uv run port.py paper.pdf --out my_vault --title "Paper Title"
 ```
 
 Produces `my_vault/<title>.md` and `my_vault/attachments/`.
+
+### Without uv (pip + venv)
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python webapp.py
+```
 
 ## Limitations
 

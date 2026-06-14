@@ -1,0 +1,16 @@
+[project]
+name = "docsidian"
+version = "0.1.0"
+description = "Convert a PDF into a ready-to-open Obsidian vault (Markdown + figures)."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "pymupdf>=1.24",
+    "flask>=3.0",
+]
+
+[project.scripts]
+docsidian = "port:main"
+
+[tool.uv]
+package = false
