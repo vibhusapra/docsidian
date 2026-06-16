@@ -27,7 +27,17 @@ def _table_md(rows: list) -> str:
     return "\n".join(out)
 
 
-def blocks_to_markdown(blocks: list[Block], attach_dir_name: str) -> str:
+def _embed_path(image_path: str, attach: str) -> str:
+    """Wikilink target for a figure: its path relative to the attachments dir,
+    e.g. 'SIA Paper/page001_fig1.png'. Obsidian resolves this by suffix, so the
+    figure is found wherever that attachments folder ends up in the vault."""
+    rel = os.path.relpath(image_path, attach)
+    if rel.startswith(".."):           # not under attachments — fall back to name
+        rel = os.path.basename(image_path)
+    return rel.replace(os.sep, "/")
+
+
+def blocks_to_markdown(blocks: list[Block], attach: str) -> str:
     lines: list[str] = []
     prev_list = False
     for b in blocks:
@@ -47,29 +57,30 @@ def blocks_to_markdown(blocks: list[Block], attach_dir_name: str) -> str:
         elif b.type == "table":
             lines.append(_table_md(b.rows or []))
         elif b.type == "image":
-            fname = os.path.basename(b.image_path)
-            lines.append(f"![[{fname}]]")
+            lines.append(f"![[{_embed_path(b.image_path, attach)}]]")
         lines.append("")  # blank line between blocks
         prev_list = is_list
     return "\n".join(lines).strip() + "\n"
 
 
 def write_vault(pages_blocks: list[list[Block]], out_dir: str, title: str):
-    """Write a single note (all pages concatenated); ensure figures live in
-    attachments/. Images extracted straight into attachments/ are left in place."""
+    """Write a single note (all pages concatenated). Figures already live under
+    attachments/<document>/ from extraction; any that don't are copied in,
+    preserving their subfolder."""
     attach = os.path.join(out_dir, "attachments")
     os.makedirs(attach, exist_ok=True)
 
     all_blocks: list[Block] = []
     for blocks in pages_blocks:
         for b in blocks:
-            if b.type == "image" and b.image_path:
-                dest = os.path.join(attach, os.path.basename(b.image_path))
-                if os.path.abspath(b.image_path) != os.path.abspath(dest):
-                    shutil.copy2(b.image_path, dest)
+            if b.type == "image" and b.image_path and _embed_path(
+                    b.image_path, attach) == os.path.basename(b.image_path) \
+                    and os.path.abspath(os.path.dirname(b.image_path)) != os.path.abspath(attach):
+                # external image — copy into attachments root
+                shutil.copy2(b.image_path, os.path.join(attach, os.path.basename(b.image_path)))
         all_blocks.extend(blocks)
 
-    md = blocks_to_markdown(all_blocks, "attachments")
+    md = blocks_to_markdown(all_blocks, attach)
     note_path = os.path.join(out_dir, f"{title}.md")
     with open(note_path, "w") as f:
         f.write(f"# {title}\n\n")

@@ -174,11 +174,11 @@ def _rect_contains(outer, inner_bbox, pad: float = 2.0) -> bool:
     return (outer[0] - pad <= cx <= outer[2] + pad) and (outer[1] - pad <= cy <= outer[3] + pad)
 
 
-def extract_page(page, doc, img_dir: str, page_num: int, prefix: str = "") -> list[Element]:
+def extract_page(page, doc, img_dir: str, page_num: int, subdir: str = "") -> list[Element]:
     """Return ordered elements for one page, saving images to img_dir.
 
-    prefix: prepended to figure filenames so images from different documents
-    stay unique when their attachments are merged into one Obsidian vault.
+    subdir: per-document folder under img_dir to save figures into, so each
+    document's images live in their own attachments subfolder in the vault.
     """
     # TEXT_DEHYPHENATE off here (we handle wraps ourselves); expand ligatures
     # so "fi"/"fl" glyphs decode to real letters instead of garbage.
@@ -242,12 +242,15 @@ def extract_page(page, doc, img_dir: str, page_num: int, prefix: str = "") -> li
         if lines:
             elements.append(Element("text", tuple(block["bbox"]), lines=lines))
 
-    # Render each merged figure region to a single PNG at 2x for clarity.
+    # Render each merged figure region to a single PNG at 2x for clarity,
+    # into this document's own subfolder under the attachments dir.
+    dest_dir = os.path.join(img_dir, subdir) if subdir else img_dir
+    os.makedirs(dest_dir, exist_ok=True)
     for i, rect in enumerate(figure_rects, 1):
         clip = fitz.Rect(rect)
         pix = page.get_pixmap(clip=clip, matrix=fitz.Matrix(2, 2))
-        fname = f"{prefix}page{page_num:03d}_fig{i}.png"
-        fpath = os.path.join(img_dir, fname)
+        fname = f"page{page_num:03d}_fig{i}.png"
+        fpath = os.path.join(dest_dir, fname)
         pix.save(fpath)
         elements.append(Element("image", rect, image_path=fpath))
 
@@ -518,11 +521,11 @@ def _strip_repeated_chrome(pages: list[list["Element"]], heights: list[float]) -
         els[:] = [e for e in els if e.kind != "text" or e.lines]
 
 
-def extract_pdf(pdf_path: str, img_dir: str, progress=None, prefix: str = "") -> list[list[Element]]:
+def extract_pdf(pdf_path: str, img_dir: str, progress=None, subdir: str = "") -> list[list[Element]]:
     """Extract every page. Returns a list (per page) of element lists.
 
     progress: optional callback(page_index, page_count) called per page.
-    prefix: namespaces saved figure filenames (for vault merging).
+    subdir: per-document folder under img_dir for this doc's figures.
     """
     os.makedirs(img_dir, exist_ok=True)
     doc = fitz.open(pdf_path)
@@ -531,7 +534,7 @@ def extract_pdf(pdf_path: str, img_dir: str, progress=None, prefix: str = "") ->
     heights = []
     for i, page in enumerate(doc):
         heights.append(page.rect.height)
-        pages.append(extract_page(page, doc, img_dir, i + 1, prefix=prefix))
+        pages.append(extract_page(page, doc, img_dir, i + 1, subdir=subdir))
         if progress:
             progress(i + 1, n)
     doc.close()
